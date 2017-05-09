@@ -124,24 +124,71 @@ let par_range (W:(int*int)[]) (M: int[][]) =
     let R = Array.zeroCreate<int>(N2 + 2)  // sentinel in 0 and N2+1
     let R' = Array.zeroCreate<int>(N2 + 2)
     Array.blit M.[0] 0 R 1 N2                  //R.[0] and R.[N2+1] are sentinel and initial R with the 2nd row
-    let K = W.Length
+    // let K = W.Length
 
     let rec FindMax R R' i1 =
-        let (low, high1) = W.[j2]
-        if VERBOSE then PrintRowInRange i1 (low - 1) R low high1   //verbose print
-        //printfn "i1 = %d" i1
-
         if i1 = N1 - 1 then R
-        else            
-            //Array.blit M.[i1 + 1] 0 R' 1 N2   //every loop assign original next row to R'           
-            FindMaxInNextRowParNaive R R' M i1 low high1 |> ignore      
+        else
+            Parallel.ForEach(W, fun (low, high1) ->
+                if VERBOSE then 
+                    PrintRowInRange i1 low R (low + 1) (high1 + 1)   //verbose print
+                //printfn "i1 = %d" i1
+                //Array.blit M.[i1 + 1] 0 R' 1 N2   //every loop assign original next row to R'           
+                FindMaxInNextRow R R' M i1 (low + 1) (high1 + 1)
+                if VERBOSE && (i1 = N2 - 2) then
+                    PrintRowInRange i1 low R' (low + 1) (high1 + 1)
+            ) |> ignore
+
             FindMax R' R (i1 + 1)
     
     FindMax R R' 0 
 
 
 let async_range (W:(int*int)[]) (M: int[][]) = 
-    M.[0]
+    let N1 = M.Length
+    let N2 = M.[0].Length
+    let R = Array.zeroCreate<int>(N2 + 2)  // sentinel in 0 and N2+1
+    let R' = Array.zeroCreate<int>(N2 + 2)
+    Array.blit M.[0] 0 R 1 N2                  //R.[0] and R.[N2+1] are sentinel and initial R with the 2nd row
+    let K = W.Length
+
+    let rec FindMax R R' i1 =
+        if i1 = N1 - 1 then R
+        else
+            let asyncs = 
+                [| for j2 in 0 .. K - 1 ->
+                    async {
+                        let (low, high1) = W.[j2]
+                        if VERBOSE then 
+                            PrintRowInRange i1 low R (low + 1) (high1 + 1)   //verbose print
+                        //printfn "i1 = %d" i1
+                        //Array.blit M.[i1 + 1] 0 R' 1 N2   //every loop assign original next row to R'           
+                        FindMaxInNextRow R R' M i1 (low + 1) (high1 + 1)
+                        if VERBOSE && (i1 = N2 - 2) then
+                            PrintRowInRange i1 low R' (low + 1) (high1 + 1)
+                    }
+                |]
+            asyncs |> Async.Parallel |> Async.RunSynchronously |> ignore
+
+            FindMax R' R (i1 + 1)
+    
+    FindMax R R' 0 
+
+
+type fifo = list<int> * list<int>
+
+let put (x:int) (f:fifo) = 
+    let f1, f2 = f
+    (x::f1, f2)
+
+let rec get (f:fifo) =
+    match f with
+    | ([], []) -> failwith "empty"
+    | (f1, y::f2) -> y, (f1, f2)
+    | (f1, []) -> get ([], List.rev (f1))
+
+let isempty (f:fifo) =
+    f = ([], [])
 
 let mailbox_range (W:(int*int)[]) (M: int[][]) = 
     M.[0]
@@ -169,11 +216,16 @@ let main argv =
         let GetPartitions = 
             let partitions = Int32.Parse k
             let N2 = M.[0].Length
+            let parSize = fun () ->
+                match partitions with 
+                | 0 -> 0
+                | _ -> N2 / partitions
+
             match partitions with 
             | 0 -> Partitioner.Create(0, N2).AsParallel().ToArray() |> Array.sort
-            | _ -> 
-        let W = GetPartitions()
-
+            | _ -> seq { for j2 in 0 .. (partitions - 1) ->
+                            (j2 * parSize(), (j2 + 1) * parSize())} |> Array.ofSeq |> Array.sort
+        
         let run funcName func =
             Console.WriteLine (sprintf "\r\n$$$ %s" funcName)
             let R = duration (fun () -> func M)
@@ -182,10 +234,17 @@ let main argv =
         match alg with
         | "/SEQ" -> run "sequential (no range)" sequential
         | "/PAR-NAÏVE" | "/PAR-NAIVE" -> run "par_naïve (no range)" par_naive
-        | "/PAR-RANGE" -> run "par_range" (par_range W)
-        | "/ASYNC-RANGE" -> run "async_range" (async_range W)
-        | "/MAILBOX-RANGE" -> run "mailbox_range" (mailbox_range W)
-        | "/AKKA-RANGE" -> run "Akka_range" (Akka_range W)
+        | "/PAR-RANGE" -> run "par_range" (par_range GetPartitions)
+        | "/ASYNC-RANGE" -> run "async_range" (async_range GetPartitions)
+        | "/MAILBOX-RANGE" -> run "mailbox_range" (mailbox_range GetPartitions)
+        | "/AKKA-RANGE" -> run "Akka_range" (Akka_range GetPartitions)
+        | "*" -> 
+            run "sequential (no range)" sequential
+            run "par_naïve (no range)" par_naive
+            run "par_range" (par_range GetPartitions)
+            run "async_range" (async_range GetPartitions)
+            run "mailbox_range" (mailbox_range GetPartitions)
+            run "Akka_range" (Akka_range GetPartitions)
         | _ -> ()
 
     
